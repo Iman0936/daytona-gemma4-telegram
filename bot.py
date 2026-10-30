@@ -8,20 +8,21 @@ Config via environment variables:
                 (for a personal test bot, set it to your own ID so only you can use it)
   SYSTEM_PROMPT optional system prompt (without the thinking token; see THINKING)
   THINKING      optional, default "1" = thinking mode ON; set "0" to disable
-  MAX_TOKENS    optional, default 8192 (thinking tokens count toward this budget;
-                the real ceiling is the server context — see run.sh)
+  MAX_TOKENS    optional, default 32768 (thinking tokens count toward this budget;
+                the real ceiling is the server context — see watchdog.sh)
 
 Generation settings are Google's official recommendation for Gemma 4:
   temperature=1.0, top_p=0.95, top_k=64
 
 Thinking mode is ON by default: per Google's docs it is activated by putting
 the <|think|> token at the start of the system prompt. The model's internal
-reasoning is NEVER shown to the user — while it thinks, the bot shows a
-"thinking" indicator, and only the final answer is streamed. Thought content
-is also kept out of the conversation history (Google's multi-turn rule).
+reasoning is shown in a collapsible quote box above the answer (while
+streaming, only the tail of the thought is shown in a plain quote, since
+Telegram re-collapses expandable quotes on every edit). Thought content
+is kept out of the conversation history (Google's multi-turn rule).
 
-Long memory: the bot keeps the last 40 exchanges per chat (trimmed to a
-character budget so history + answer always fit the 32K context) and
+Long memory: the bot keeps the last 100 exchanges per chat (trimmed to a
+120000-character budget so history + answer always fit the 64K context) and
 persists them to history.json next to this file, so the model's memory
 survives bot and server restarts. /reset wipes a chat's memory.
 llama-server reuses the cached prompt prefix between turns, so serving a
@@ -46,8 +47,10 @@ import os
 import re
 import time
 
+import html
 import httpx
 from telegram import Update
+from telegram.request import HTTPXRequest
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     Application,
@@ -68,9 +71,9 @@ _BASE_SYSTEM = os.environ.get(
     "You are a helpful assistant. Always reply in the same language as the user's message.",
 )
 SYSTEM_PROMPT = ("<|think|>" + _BASE_SYSTEM) if THINKING else _BASE_SYSTEM
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "8192"))
-HISTORY_TURNS = 40         # the model's memory: how many exchanges it can recall
-MAX_HISTORY_CHARS = 32000  # guardrail: history + answer must fit the context
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "32768"))
+HISTORY_TURNS = 100         # the model's memory: how many exchanges it can recall
+MAX_HISTORY_CHARS = 120000  # guardrail: history + answer must fit the context
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
 
 # chat_id -> list of {"role": ..., "content": ...}
@@ -135,15 +138,76 @@ def _visible_text(content: str) -> str:
     return text.strip()
 
 
-def _preview(content: str, reasoning: str) -> str:
-    """What the user may see mid-generation — never raw thought text."""
+def _thought_text(content: str, reasoning: str) -> str:
+    """The model's thinking: the reasoning_content stream when the server
+    sends one, otherwise the thought embedded in content channel tags."""
+    if reasoning.strip():
+        return reasoning.strip()
+    parts = []
+    for m in THOUGHT_BLOCK.findall(content):
+        parts.append(
+            m.replace("<|channel>thought", "", 1).replace("<channel|>", "").strip()
+        )
+    open_idx = content.rfind("<|channel>thought")
+    if open_idx != -1 and "<channel|>" not in content[open_idx:]:
+        parts.append(content[open_idx + len("<|channel>thought"):].strip())
+    return "\n".join(p for p in parts if p).strip()
+
+
+def _cut_html(s: str, limit: int = 4000):
+    """Split s into (chunk, rest) with chunk <= limit, without breaking
+    the HTML: never cut inside a tag or an entity, and if a blockquote
+    is left open in the chunk, close it there and reopen it in the rest."""
+    if len(s) <= limit:
+        return s, ""
+    cut = limit
+    lt = s.rfind("<", 0, cut)
+    if lt != -1 and s.find(">", lt) >= cut:
+        cut = lt
+    amp = s.rfind("&", 0, cut)
+    if amp != -1 and ";" not in s[amp:cut]:
+        cut = amp
+    chunk, rest = s[:cut], s[cut:]
+    if chunk.count("<blockquote") > chunk.count("</blockquote>"):
+        kind = "<blockquote expandable>" if "<blockquote expandable>" in chunk else "<blockquote>"
+        chunk += "</blockquote>"
+        rest = kind + rest
+    return chunk, rest
+
+
+def _chunk_html(s: str, limit: int = 4000) -> list:
+    chunks = []
+    while s:
+        chunk, s = _cut_html(s, limit)
+        chunks.append(chunk)
+    return chunks
+
+
+def _preview(content: str, reasoning: str, final: bool = False) -> str:
+    """What the user sees (HTML): the model's thinking in a quote box on
+    top, the answer below it - the display form of the Qwen bot. While
+    streaming, Telegram re-collapses expandable quotes on every edit, so
+    the live view is a plain quote holding only the thought's tail; the
+    full expandable quote lands in the final message. The thinking
+    itself is never altered, shortened or limited - only displayed."""
+    thought = _thought_text(content, reasoning)
     text = _visible_text(content)
+    parts = []
+    if thought:
+        if final:
+            parts.append(f"<blockquote expandable>🧠 {html.escape(thought)}</blockquote>")
+        else:
+            tail = thought[-350:]
+            if len(thought) > 350:
+                tail = "…" + tail
+            parts.append(f"<blockquote>🧠 {html.escape(tail)}</blockquote>")
     if text:
-        return text  # full visible answer; the caller chunks it across messages
+        parts.append(html.escape(text))
+    if parts:
+        return "\n".join(parts)
     if reasoning or content:
         return THINKING_TEXT
     return ""
-
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update) or not update.message or not update.message.text:
@@ -170,7 +234,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         """Edit a message, riding out Telegram flood limits. True = shown."""
         for _ in range(5):
             try:
-                await msg.edit_text(text)
+                await msg.edit_text(text, parse_mode="HTML")
                 return True
             except RetryAfter as e:
                 await asyncio.sleep(min(e.retry_after + 1, 30))
@@ -184,7 +248,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         """Send a new message, riding out Telegram flood limits."""
         for _ in range(5):
             try:
-                return await context.bot.send_message(chat_id=chat_id, text=text)
+                return await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
             except RetryAfter as e:
                 await asyncio.sleep(min(e.retry_after + 1, 30))
             except Exception:
@@ -197,12 +261,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # otherwise the chunk is retried on the next tick, never skipped.
         nonlocal current, base
         while len(full_visible) - base > 4000:
-            if not await _edit(current, full_visible[base : base + 4000]):
+            piece, _ = _cut_html(full_visible[base:], 4000)
+            if not await _edit(current, piece):
                 return
             new_msg = await _send("…")
             if new_msg is None:
                 return
-            base += 4000
+            base += len(piece)
             current = new_msg
         tail = full_visible[base:]
         if tail:
@@ -256,8 +321,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception:
         pass  # connection/stream broke — keep whatever partial answer arrived
 
-    answer = _visible_text(content)
-    if not answer:
+    clean = _visible_text(content)
+    if base == 0:
+        # Nothing was sealed while streaming: the whole reply still lives
+        # in the current message, so it can be replaced wholesale by the
+        # final form (full thought in an expandable quote).
+        chunks = _chunk_html(_preview(content, reasoning, final=True))
+    else:
+        # Part of the reply is already sealed in earlier messages and
+        # cannot be rewritten. Finish in the streaming form instead:
+        # replacing from chunk 0 here would resend the text from the
+        # beginning and duplicate the answer (bug seen 2026-10-30).
+        chunks = _chunk_html(_preview(content, reasoning)[base:])
+    if not clean:
         history.pop()  # drop the failed user turn
         if content or reasoning:
             msg = "فکر کردن این سؤال کل بودجه توکن رو خورد و به جواب نرسید. سؤالت رو کوتاه‌تر بپرس."
@@ -266,22 +342,74 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _edit(current, msg)
         return
 
-    history.append({"role": "assistant", "content": answer})
+    history.append({"role": "assistant", "content": clean})
     _save_histories()
     # Deliver whatever is left, in order: fill the current message first
     # (falling back to a fresh message if the edit will not land), then
     # continue in new messages until the whole answer is out.
-    tail = answer[base:]
-    if tail:
-        if not await _edit(current, tail[:4000]):
-            await _send(tail[:4000])
-        rest = tail[4000:]
-        for i in range(0, len(rest), 4000):
-            await _send(rest[i : i + 4000])
+    if chunks:
+        if not await _edit(current, chunks[0]):
+            await _send(chunks[0])
+        for ch in chunks[1:]:
+            await _send(ch)
+
+
+
+# --- Liveness: heartbeat + Telegram-link monitor -------------------------
+# Why: on 2026-10-30 this bot was found alive but silently dead for days -
+# Telegram had closed its pooled connections (sockets stuck in CLOSE-WAIT)
+# and the long-poll never recovered. Three layers against that death:
+# 1) explicit HTTPX timeouts in main(): a dead connection now ERRORS
+#    within seconds instead of hanging forever, and polling retries on a
+#    fresh connection;
+# 2) this monitor: probes Telegram through the bot's own connection every
+#    60 s, refreshes heartbeat.txt, and exits after 3 failed probes so the
+#    watchdog starts a fresh process;
+# 3) watchdog.sh supervises heartbeat.txt: a wedged event loop stops
+#    refreshing it, and the watchdog SIGKILLs and restarts the bot.
+HEARTBEAT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "heartbeat.txt")
+_link_fails = 0
+
+
+async def _liveness(app: Application) -> None:
+    global _link_fails
+    while True:
+        try:
+            await asyncio.wait_for(app.bot.get_me(), timeout=15)
+            _link_fails = 0
+        except Exception:
+            _link_fails += 1
+            if _link_fails >= 3:
+                os._exit(1)  # link is dead; the watchdog starts a fresh process
+        try:
+            with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+
+async def _post_init(app: Application) -> None:
+    asyncio.create_task(_liveness(app))
 
 
 def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).build()
+    request = HTTPXRequest(
+        connection_pool_size=8, connect_timeout=10.0,
+        read_timeout=20.0, write_timeout=20.0, pool_timeout=5.0,
+    )
+    get_updates_request = HTTPXRequest(
+        connection_pool_size=2, connect_timeout=10.0,
+        read_timeout=45.0, write_timeout=20.0, pool_timeout=5.0,
+    )
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .get_updates_request(get_updates_request)
+        .post_init(_post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))

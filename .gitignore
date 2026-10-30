@@ -1,0 +1,12 @@
+models/
+llama/
+llama-src/
+.venv/
+config.env
+secrets.env
+history.json
+heartbeat.txt
+*.log
+*.out
+*.bak*
+__pycache__/

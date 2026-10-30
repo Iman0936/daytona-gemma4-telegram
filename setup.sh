@@ -70,6 +70,5 @@ else
 fi
 
 echo ""
-echo "Setup done. Next:"
-echo "  export BOT_TOKEN=\"<token from BotFather>\""
-echo "  bash run.sh"
+echo "Setup done. Bring everything up with the one command:"
+echo "  bash start.sh"

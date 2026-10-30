@@ -1,3 +1,5 @@
+<div dir="rtl">
+
 # Gemma 4 E4B روی Daytona + ربات تلگرام
 
 مدل **Gemma 4 E4B بدون سانسور** (نسخه HauhauCS، ‏Q4) روی یک سندباکس Daytona بالا می‌آید
@@ -13,23 +15,35 @@
 
 ## قدم ۱ — گرفتن کدها (یک دستور)
 
+</div>
+
 ```bash
-git clone https://github.com/<YOUR-USERNAME>/daytona-gemma4-telegram.git
+git clone https://github.com/Iman0936/daytona-gemma4-telegram.git
 cd daytona-gemma4-telegram
 ```
 
+<div dir="rtl">
+
 اگر `git` نبود، جایگزین:
 
+</div>
+
 ```bash
-curl -L -o repo.zip https://github.com/<YOUR-USERNAME>/daytona-gemma4-telegram/archive/refs/heads/main.zip
+curl -L -o repo.zip https://github.com/Iman0936/daytona-gemma4-telegram/archive/refs/heads/main.zip
 unzip repo.zip && cd daytona-gemma4-telegram-main
 ```
 
+<div dir="rtl">
+
 ## قدم ۲ — بالا آوردن همه‌چیز (فقط یک دستور)
+
+</div>
 
 ```bash
 bash start.sh
 ```
+
+<div dir="rtl">
 
 همین. دفعه‌ی اول، جلوی خودت این کارها را می‌کند: نصب را انجام می‌دهد
 (باینری آماده llama.cpp از GitHub — اگر نشد از سورس بیلد می‌کند — دانلود مدل
@@ -45,9 +59,13 @@ bash start.sh
 
 برای توقف کامل:
 
+</div>
+
 ```bash
 pkill -f watchdog.sh; pkill -f llama-server; pkill -9 -f "python.*bot.py"
 ```
+
+<div dir="rtl">
 
 ## تنظیمات مدل (از داکیومنت رسمی گوگل)
 
@@ -65,9 +83,13 @@ pkill -f watchdog.sh; pkill -f llama-server; pkill -9 -f "python.*bot.py"
 برای Q4_K_M سبک‌تر (۵٫۳۴ گیگ)، روی سندباکس تازه **قبل از اولین** `bash start.sh` این‌طوری نصبش کن
 (بعدش همان `bash start.sh` معمولی کافی است):
 
+</div>
+
 ```bash
 MODEL_URL="https://huggingface.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive/resolve/main/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf" bash setup.sh
 ```
+
+<div dir="rtl">
 
 (نسخه رسمی سانسورشده گوگل هم هست: `google/gemma-4-E4B-it-qat-q4_0-gguf`، ‏۵٫۱۵ گیگ.)
 
@@ -85,3 +107,5 @@ MODEL_URL="https://huggingface.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggre
 - `watchdog.sh` — نگهبان پس‌زمینه: سرور و ربات را زنده نگه می‌دارد و رباتِ هنگ‌کرده‌ی بی‌صدا را هم ری‌استارت می‌کند
 - `bot.py` — ربات تلگرام (polling) با جواب **استریمی**: پیام هم‌زمان با تولید توکن‌ها ویرایش می‌شود و زنده تایپ می‌شود
 - `requirements.txt` — فقط `python-telegram-bot`
+
+</div>
